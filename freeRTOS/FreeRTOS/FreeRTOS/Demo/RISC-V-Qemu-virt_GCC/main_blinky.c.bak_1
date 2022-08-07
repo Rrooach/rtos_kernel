@@ -1,0 +1,198 @@
+#include <FreeRTOS.h>
+#include <task.h>
+#include <queue.h>
+#include <stdio.h>
+#include "riscv-virt.h"
+#include "ns16550.h"
+#include <stdio.h>
+#include <string.h>  
+#include "queue.h"   
+#include "FreeRTOS.h"
+#include "task.h"
+#include "timers.h"
+#include "PollQ.h"
+#include "semphr.h"
+#include "dynamic.h"
+#include "blocktim.h"
+#include "recmutex.h"
+#include "TimerDemo.h"
+#include "EventGroupsDemo.h"
+#include "TaskNotify.h"
+#include "BlockQ.h"
+#include "death.h"
+#include "flash.h"
+#include "partest.h"
+#include "semtest.h" 
+#include "GenQTest.h"
+#include "QPeek.h" 
+#include "FreeRTOS.h"
+#include "task.h"
+#include "timers.h"
+#include "semphr.h" 
+
+/* Standard demo application includes. */ 
+#include "FreeRTOS_IO.h"
+#include "partest.h"
+#include "comtest2.h" 
+#include "TimerDemo.h"
+#include "QueueOverwrite.h"
+#include "IntQueue.h"
+#include "EventGroupsDemo.h"
+  
+#define mainCHECK_TASK_PRIORITY				( configMAX_PRIORITIES - 1 ) 
+#define mainREG_TEST_TASK_1_PARAMETER		( ( void * ) 0x12345678 )
+#define mainREG_TEST_TASK_2_PARAMETER		( ( void * ) 0x87654321 ) 
+#define mainTIMER_TEST_PERIOD				( 50 )
+#define mainCHECK_LED						( 0 ) 
+#define mainDONT_BLOCK						( 0UL ) 
+#define mainNO_ERROR_CHECK_TASK_PERIOD		pdMS_TO_TICKS( 3000UL ) 
+#define mainERROR_CHECK_TASK_PERIOD 		pdMS_TO_TICKS( 200UL ) 
+#define mainCHECK_TASK_STACK_SIZE_WORDS 85 
+#define mainREG_TEST_STACK_SIZE_WORDS 50
+
+#define mainQUEUE_RECEIVE_TASK_PRIORITY		( tskIDLE_PRIORITY + 2 )
+#define	mainQUEUE_SEND_TASK_PRIORITY		( tskIDLE_PRIORITY + 1 )  
+#define mainQUEUE_SEND_FREQUENCY_MS			pdMS_TO_TICKS( 1000 ) 
+#define mainQUEUE_LENGTH					( 1 )
+ 
+#define mainQUEUE_POLL_PRIORITY				( tskIDLE_PRIORITY + 2UL )
+#define mainSEM_TEST_PRIORITY				( tskIDLE_PRIORITY + 1UL )
+#define mainBLOCK_Q_PRIORITY				( tskIDLE_PRIORITY + 2UL )
+
+#define mainDONT_BLOCK						( 0UL )
+#define mainCHECK_TIMER_PERIOD_MS			( 3000UL / portTICK_PERIOD_MS )
+#define mainERROR_CHECK_TIMER_PERIOD_MS 	( 200UL / portTICK_PERIOD_MS )
+#define mainCHECK_LED						( 0 )
+
+struct Test {
+	int idx;
+	char *pcName;
+	configSTACK_DEPTH_TYPE length;
+	void* parameters;
+	UBaseType_t priority;
+	TaskHandle_t *pxCreateTask;
+};
+
+struct Input {
+	int idx;
+	int length;
+};
+
+/*-----------------------------------------------------------*/ 
+static QueueHandle_t xQueue = NULL; 
+TaskHandle_t task1 = NULL, task2 = NULL;
+char cov[100] = "9999";
+int t66 = 9;
+volatile unsigned long ulRegTest1LoopCounter = 0UL;
+volatile unsigned long ulRegTest2LoopCounter = 0UL;
+volatile uint32_t ulTimer0Interrupts = 0, ulTimer1Interrupts = 0;
+/*-----------------------------------------------------------*/ 
+
+static void prvQueueSendTask( void *pvParameters )
+{
+	TickType_t xNextWakeTime;
+	const unsigned long ulValueToSend = 100UL;
+	const char * const pcMessage1 = "Transfer1";
+	const char * const pcMessage2 = "Transfer2";
+	int f = 1;
+	int idx = 0;
+
+	/* Remove compiler warning about unused parameter. */
+	( void ) pvParameters;
+
+	/* Initialise xNextWakeTime - this only needs to be done once. */
+	xNextWakeTime = xTaskGetTickCount();
+
+	for( ;idx <= 100; idx++ )
+	{
+		//chose(2);
+		char buf[40]; 
+		t66++;
+		int number = t66;
+		char* numberstring[100];
+		sprintf(numberstring, "%d", number);
+		vSendString(numberstring);
+		sprintf( buf, "%d: %s: %s", xGetCoreID(),
+				pcTaskGetName( xTaskGetCurrentTaskHandle() ),
+				( f ) ? pcMessage1 : pcMessage2 );
+		// vSendString( buf );
+		f = !f; 
+		vTaskDelayUntil( &xNextWakeTime, mainQUEUE_SEND_FREQUENCY_MS ); 
+		xQueueSend( xQueue, &ulValueToSend, 0U );
+	}
+}
+
+
+
+static void prvQueueReceiveTask( void *pvParameters )
+{
+	unsigned long ulReceivedValue;
+	const unsigned long ulExpectedValue = 100UL;
+	const char * const pcMessage1 = "Blink1"; 
+	const char * const pcMessage2 = "Blink2";
+	const char * const pcFailMessage = "Unexpected value received\r\n";
+	int f = 1, idx = 0;
+
+	/* Remove compiler warning about unused parameter. */
+	( void ) pvParameters;
+
+	for( ;idx <= 100; idx++ )
+	{
+		char buf[40]; 
+		xQueueReceive( xQueue, &ulReceivedValue, portMAX_DELAY ); 
+		if( ulReceivedValue == ulExpectedValue )
+		{
+			sprintf( buf, "%d: %s: %s", xGetCoreID(),
+					pcTaskGetName( xTaskGetCurrentTaskHandle() ),
+					( f ) ? pcMessage1 : pcMessage2 );
+			vSendString( buf );
+			f = !f;
+
+			ulReceivedValue = 0U;
+		}
+		else    
+		{
+			vSendString( pcFailMessage );
+		}
+	}
+} 
+
+void vAFunction( void )
+{
+/*	char buffer[40];
+	size_t xBytesRead;
+	Peripheral_Descriptor_t xOpenedPort; 
+    xOpenedPort = FreeRTOS_open( "/SPI2/", NULL );
+
+    if( xOpenedPort != NULL ) {
+		xBytesRead = FreeRTOS_read( xOpenedPort, buffer, sizeof( buffer ) );
+		if (xBytesRead == NULL) {
+			vSendString("failed to read\n");
+		}
+    } else {
+		vSendString("failed to open port\n");
+    }
+*/
+}
+
+int main_blinky( void )
+{
+	cov[1] = '1';
+	cov[2] = '2';
+	vSendString( "Hello FreeRTOS!" );
+	/* Create queue here. */
+	xQueue = xQueueCreate( mainQUEUE_LENGTH, sizeof( uint32_t ) );
+	vAFunction();
+	/* Create task here. */
+	if( xQueue != NULL )
+	{	
+		xTaskCreate( prvQueueReceiveTask, "Rx",	configMINIMAL_STACK_SIZE * 2U, 
+					NULL, mainQUEUE_RECEIVE_TASK_PRIORITY, &task1);
+		xTaskCreate( prvQueueSendTask, 	  "Tx",	configMINIMAL_STACK_SIZE * 2U, 
+					NULL, mainQUEUE_SEND_TASK_PRIORITY,    &task2);
+	}
+
+	/* schedule the task here. */
+	vTaskStartScheduler();
+	return 0;
+}

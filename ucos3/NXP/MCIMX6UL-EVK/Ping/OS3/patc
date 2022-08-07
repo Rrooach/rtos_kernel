@@ -1,0 +1,71 @@
+error: patch failed: Makefile:365
+error: Makefile: patch does not apply
+error: patch failed: arch/x86/Kconfig:28
+error: arch/x86/Kconfig: patch does not apply
+error: patch failed: arch/x86/boot/Makefile:10
+error: arch/x86/boot/Makefile: patch does not apply
+error: patch failed: arch/x86/boot/compressed/Makefile:17
+error: arch/x86/boot/compressed/Makefile: patch does not apply
+error: patch failed: arch/x86/entry/vdso/Makefile:4
+error: arch/x86/entry/vdso/Makefile: patch does not apply
+error: patch failed: arch/x86/kernel/Makefile:19
+error: arch/x86/kernel/Makefile: patch does not apply
+error: patch failed: arch/x86/kernel/apic/Makefile:2
+error: arch/x86/kernel/apic/Makefile: patch does not apply
+error: patch failed: arch/x86/kernel/cpu/Makefile:8
+error: arch/x86/kernel/cpu/Makefile: patch does not apply
+error: patch failed: arch/x86/lib/Makefile:2
+error: arch/x86/lib/Makefile: patch does not apply
+error: patch failed: arch/x86/mm/Makefile:1
+error: arch/x86/mm/Makefile: patch does not apply
+error: patch failed: arch/x86/realmode/rm/Makefile:7
+error: arch/x86/realmode/rm/Makefile: patch does not apply
+error: include/linux/kcov.h: already exists in working directory
+error: patch failed: include/linux/sched.h:1807
+error: include/linux/sched.h: patch does not apply
+error: include/uapi/linux/kcov.h: already exists in working directory
+error: patch failed: kernel/Makefile:19
+error: kernel/Makefile: patch does not apply
+error: patch failed: kernel/exit.c:53
+error: kernel/exit.c: patch does not apply
+error: patch failed: kernel/fork.c:75
+error: kernel/fork.c: patch does not apply
+error: kernel/kcov.c: already exists in working directory
+error: patch failed: kernel/locking/Makefile:1
+error: kernel/locking/Makefile: patch does not apply
+error: patch failed: kernel/rcu/Makefile:1
+error: kernel/rcu/Makefile: patch does not apply
+error: patch failed: kernel/sched/Makefile:2
+error: kernel/sched/Makefile: patch does not apply
+error: patch failed: lib/Kconfig.debug:678
+error: lib/Kconfig.debug: patch does not apply
+error: patch failed: lib/Makefile:7
+error: lib/Makefile: patch does not apply
+error: patch failed: mm/Makefile:5
+error: mm/Makefile: patch does not apply
+error: patch failed: mm/kasan/Makefile:1
+error: mm/kasan/Makefile: patch does not apply
+error: patch failed: scripts/Makefile.lib:130
+error: scripts/Makefile.lib: patch does not apply
+
+
+linux/a55daaede68b462d201d2dbcc47a14b50bc32d30 linux/a6dfcecab50eb7fceb95a31292caa9a38eb21396 linux/a95c7753605c9d219466 linux/b055b1a6b2b958707a21 linux/b06f4b773e34bfb6e0786a7de002dbda789bfe4a
+linux/b261701f02d8a7b36733 linux/b4e0ed376acfab73c577c366fd63b58a1372fc29 linux/b4f9b1a41ad57a31a9e3b50c71145c971f51f8a5 linux/b636fe4123f39f69c35b linux/b055b1a6b2b958707a21
+
+linux/c2b84c4361ff01d10630d703bf35ab61d1fd0d41 linux/c63745cb0e718ef69011 linux/c915885f05d8e432e7b4 linux/d37b1f6c13f39c353fea44dffa4b1830f8b55874 linux/d4b9a2851cc3ce998741 linux/d5d1a91a767b22d3b9897e8046b7b43bb5fca68e linux/d98d666ccfa0e74f2e459083956394fee8a985df linux/f746a024e329ba85aa9034d9bdd5a452e5a716ef
+
+BUG: unable to handle kernel paging request at ffffffff9f47f4b9
+linux/f816042a7ae2225f25ba
+
+WARNING: CPU: 3 PID: 1 at arch/x86/kernel/smp.c:128 native_smp_send_reschedule+0x2f/0x40
+linux/f9aee1b671ee4c1fbafc98d36a896b996ea9c0bc
+
+BUG: unable to handle kernel paging request at ffffffffc8b0c26e
+linux/1085dec0e2097c537d0b
+
+
+
+linux/a55daaede68b462d201d2dbcc47a14b50bc32d30.c linux/a6dfcecab50eb7fceb95a31292caa9a38eb21396.c linux/a95c7753605c9d219466.c linux/b055b1a6b2b958707a21.c linux/b06f4b773e34bfb6e0786a7de002dbda789bfe4a.c linux/b261701f02d8a7b36733.c linux/b4e0ed376acfab73c577c366fd63b58a1372fc29.c linux/b4f9b1a41ad57a31a9e3b50c71145c971f51f8a5.c linux/b636fe4123f39f69c35b.c linux/b055b1a6b2b958707a21.c linux/c2b84c4361ff01d10630d703bf35ab61d1fd0d41.c linux/c63745cb0e718ef69011.c linux/c915885f05d8e432e7b4.c linux/d37b1f6c13f39c353fea44dffa4b1830f8b55874.c linux/d4b9a2851cc3ce998741.c linux/d5d1a91a767b22d3b9897e8046b7b43bb5fca68e.c linux/d98d666ccfa0e74f2e459083956394fee8a985df.c linux/f746a024e329ba85aa9034d9bdd5a452e5a716ef.c linux/f816042a7ae2225f25ba.c linux/f9aee1b671ee4c1fbafc98d36a896b996ea9c0bc.c linux/1085dec0e2097c537d0b.c
+
+
+linux/abb6cc54bd2802dfdeb0978f7adf870325b80f92.c linux/c2b84c4361ff01d10630d703bf35ab61d1fd0d41.c linux/227839a33b4efda3cafd.c linux/3412d306afcb68c2a2fa64bd31e9d3a2cb002b18.c linux/4c1e32218a9d6c548d6ad48c4c80bc3b604eec32.c linux/5169fc0121896ee7b28a.c linux/60224fb0b28144ba93b7.c linux/7649fc6efd40498f002864f989cb131500f4f28a.c linux/83c1e71f3d034bd70e25d22f6fa3238f370750e9.c

@@ -1,0 +1,1500 @@
+/*
+*********************************************************************************************************
+*                                            EXAMPLE CODE
+*
+*               This file is provided as an example on how to use Micrium
+*products.
+*
+*               Please feel free to use any application code labeled as 'EXAMPLE
+*CODE' in your application products.  Example code may be used as is, in whole
+*or in part, or may be used as a reference only. This file can be modified as
+*               required to meet the end-product requirements.
+*
+*               Please help us continue to provide the Embedded community with
+*the finest software available.  Your honesty is greatly appreciated.
+*
+*               You can find our product's user manual, API reference, release
+*notes and more information at https://doc.micrium.com. You can contact us at
+*www.micrium.com.
+*********************************************************************************************************
+*/
+
+/*
+*********************************************************************************************************
+*
+*                                             EXAMPLE CODE
+*
+*                                             NXP MCIMX6UL
+*                                                on the
+*
+*                                       i.MX6 UltraLite EVK Board
+*
+* Filename : main.c
+*********************************************************************************************************
+* Note(s) : none.
+*********************************************************************************************************
+*/
+
+/*
+*********************************************************************************************************
+*                                            INCLUDE FILES
+*********************************************************************************************************
+*/
+
+#include <cpu.h>
+#include <cpu_core.h>
+#include <lib_mem.h>
+#include <lib_str.h>
+#include <os.h>
+
+#include "../app_cfg.h"
+#include "os_app_hooks.h"
+
+#if (APP_CFG_TCPIP_EN > 0u)
+#include "../app_tcpip.h"
+#include <Source/net.h>
+#endif
+
+#include <bsp_gpio.h>
+#include <bsp_int.h>
+#include <bsp_iomux.h>
+#include <bsp_os.h>
+#include <bsp_ser.h>
+#include <bsp_sys.h>
+
+/*
+*********************************************************************************************************
+*                                            LOCAL DEFINES
+*********************************************************************************************************
+*/
+
+#if defined(__GNUC__)
+#define SYSCALLAPI
+#define NORETURN __attribute__((noreturn))
+#define ALIGNED(N) __attribute__((aligned(N)))
+#define PRINTF(fmt, args) __attribute__((format(printf, fmt, args)))
+#define INPUT_DATA_ALIGNMENT 64 << 10
+#else
+// Assuming windows/cl.
+#define SYSCALLAPI WINAPI
+#define NORETURN __declspec(noreturn)
+#define INPUT_DATA_ALIGNMENT 4 << 10
+#define ALIGNED(N)                                                             \
+  __declspec(align(N)) // here we are not aligning the value because of msvc
+                       // reporting the value as an illegal value
+#define PRINTF(fmt, args)
+#define __thread __declspec(thread)
+#endif
+
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
+#define kMaxFd 250
+#define kMaxThreads 16
+#define kInPipeFd kMaxFd - 1  // remapped from stdin
+#define kOutPipeFd kMaxFd - 2 // remapped from stdout
+#define kCoverFd kOutPipeFd - kMaxThreads
+#define kMaxArgs 13
+#define kCoverSize 256 << 10
+#define kFailStatus 67
+
+#if 0
+#define debug_verbose(...) debug(__VA_ARGS__)
+#else
+#define debug_verbose(...) (void)0
+#endif
+
+#define SYZ_EXECUTOR 1
+#include "common.h"
+
+#define kMaxInput (4 << 20) // keep in sync with prog.ExecBufferSize
+#define kMaxCommands                                                           \
+  1000 // prog package knows about this constant (prog.execMaxCommands)
+
+const __uint64_t instr_eof = -1;
+#define instr_copyin -2
+#define instr_copyout -3
+#define instr_setprops -4
+
+#define arg_const 0
+#define arg_result 1
+#define arg_data 2
+#define arg_csum 3
+
+#define binary_format_native 0
+#define binary_format_bigendian 1
+#define binary_format_strdec 2
+#define binary_format_strhex 3
+#define binary_format_stroct 4
+// Checksum kinds.
+#define arg_csum_inet 0
+// Checksum chunk kinds.
+#define arg_csum_chunk_data 0
+#define arg_csum_chunk_const 1
+#define SYSCALLAPI
+#define MAX_SIZE (1 << 16)
+#define MAX_PROG_SIZE (2 << 20)
+#define MAX_DATA_SIZE (2 << 24)
+#define MAX_PROG_LEN (1 << 4)
+/*
+*********************************************************************************************************
+*                                       LOCAL GLOBAL VARIABLES
+*********************************************************************************************************
+*/
+
+// char EG_COVER[MAX_SIZE];
+// char BB_COVER[MAX_SIZE];
+char misc[1024];
+char corpus_buffer[MAX_PROG_SIZE] = "feryrferyrferyr";
+char data_buffer[MAX_DATA_SIZE] = "0";
+
+
+#if SYZ_EXECUTOR_USES_FORK_SERVER
+static void receive_handshake();
+static void reply_handshake();
+#endif
+#if SYZ_EXECUTOR_USES_SHMEM
+const int kMaxOutput = 16 << 20;
+const int kInFd = 3;
+const int kOutFd = 4;
+static __uint32_t *output_data;
+static __uint32_t *output_pos;
+static __uint32_t *write_output(__uint32_t v);
+static __uint32_t *write_output_64(__uint64_t v);
+static void write_completed(__uint32_t completed);
+static __uint32_t hash(__uint32_t a);
+static __uint32_t dedup(__uint32_t sig);
+#endif
+
+typedef unsigned long long __uint64_t;
+typedef unsigned int __uint32_t;
+typedef unsigned short __uint16_t;
+typedef unsigned char __uint8_t;
+/* ----------------- APPLICATION GLOBALS ------------------ */
+static CPU_STK StartupTaskStk[APP_CFG_TASK_STARTUP_STK_SIZE];
+static OS_TCB StartupTaskTCB;
+
+__uint64_t start_time_ms = 0;
+
+static __uint32_t flag_debug;
+static __uint32_t flag_coverage;
+static __uint32_t flag_sandbox_none;
+static __uint32_t flag_sandbox_setuid;
+static __uint32_t flag_sandbox_namespace;
+static __uint32_t flag_sandbox_android;
+static __uint32_t flag_extra_coverage;
+static __uint32_t flag_net_injection;
+static __uint32_t flag_net_devices;
+static __uint32_t flag_net_reset;
+static __uint32_t flag_cgroups;
+static __uint32_t flag_close_fds;
+static __uint32_t flag_devlink_pci;
+static __uint32_t flag_vhci_injection;
+static __uint32_t flag_wifi;
+
+static __uint32_t flag_collect_cover;
+static __uint32_t flag_dedup_cover;
+static __uint32_t flag_threaded;
+static __uint32_t flag_collide;
+static __uint32_t flag_coverage_filter;
+
+// If 1, then executor should write the comparisons data to fuzzer.
+static __uint32_t flag_comparisons;
+
+// Tunable timeouts, received with execute_req.
+static __uint64_t syscall_timeout_ms;
+static __uint64_t program_timeout_ms;
+static __uint64_t slowdown_scale;
+
+const __uint64_t no_copyout = -1;
+
+static int running;
+static __uint32_t collide;
+__uint32_t completed;
+__uint32_t is_kernel_64_bit = 1;
+
+ALIGNED(INPUT_DATA_ALIGNMENT)
+char input_data[kMaxInput];
+
+/* ----------------- APPLICATION GLOBALS ------------------ */
+static CPU_STK StartupTaskStk[APP_CFG_TASK_STARTUP_STK_SIZE];
+static OS_TCB StartupTaskTCB;
+
+/*
+*********************************************************************************************************
+*                                       LOCAL STRUCTURE DECLARE
+*********************************************************************************************************
+*/
+
+typedef struct {
+  __uint64_t disabled;
+  __uint64_t timeout;
+  __uint64_t prog_timeout;
+  __uint64_t ignore_return;
+  __uint64_t breaks_returns;
+} call_attrs_t;
+
+typedef struct {
+  int fail_nth;
+} call_props_t;
+
+#define SYSCALLAPI
+typedef intptr_t(SYSCALLAPI *syscall_t)(intptr_t, intptr_t, intptr_t, intptr_t,
+                                        intptr_t, intptr_t, intptr_t, intptr_t,
+                                        intptr_t, intptr_t, intptr_t, intptr_t,
+                                        intptr_t);
+
+typedef struct {
+  __uint64_t syscall_id;
+  __uint64_t args_val[13];
+  __uint64_t args_typ[13];
+  __uint64_t ret;
+} syscall;
+ 
+typedef struct {
+  const char *name;
+  int sys_nr;
+  call_attrs_t attrs;
+  syscall_t call;
+} call_t; 
+
+typedef struct {
+  int fd;
+  __uint32_t size;
+  char *data;
+  char *data_end;
+  // Note: On everything but darwin the first value in data is the count of
+  // recorded PCs, followed by the PCs. We therefore set data_offset to the
+  // size of one PC.
+  // On darwin data points to an instance of the ksancov_trace struct. Here we
+  // set data_offset to the offset between data and the structs 'pcs' member,
+  // which contains the PCs.
+  intptr_t data_offset;
+  // Note: On everything but darwin this is 0, as the PCs contained in data
+  // are already correct. XNUs KSANCOV API, however, chose to always squeeze
+  // PCs into 32 bit. To make the recorded PC fit, KSANCOV substracts a fixed
+  // offset (VM_MIN_KERNEL_ADDRESS for AMD64) and then truncates the result to
+  // __uint32_t. We get this from the 'offset' member in ksancov_trace.
+  intptr_t pc_offset;
+} cover_t;
+
+typedef struct {
+  int id;
+  __uint32_t created;
+  event_t ready;
+  event_t done;
+  __uint64_t *copyout_pos;
+  __uint64_t copyout_index;
+  __uint32_t colliding;
+  __uint32_t executing;
+  int call_index;
+  int call_num;
+  int num_args;
+  intptr_t args[kMaxArgs];
+  call_props_t call_props;
+  intptr_t res;
+  __uint32_t reserrno;
+  __uint32_t fault_injected;
+  cover_t cov;
+  __uint32_t soft_fail_state;
+} thread_t;
+
+static thread_t threads[kMaxThreads];
+static thread_t *last_scheduled;
+// Threads use this variable to access information about themselves.
+// static __thread thread_t* current_thread;
+static thread_t *current_thread;
+static cover_t extra_cov;
+
+typedef struct {
+  __uint32_t executed;
+  __uint64_t val;
+} res_t;
+
+static res_t results[kMaxCommands];
+
+const __uint64_t kInMagic = 0xbadc0ffeebadface;
+const __uint32_t kOutMagic = 0xbadf00d;
+
+typedef struct {
+  __uint64_t magic;
+  __uint64_t flags; // env flags
+  __uint64_t pid;
+} handshake_req;
+
+typedef struct {
+  __uint32_t magic;
+} handshake_reply;
+
+typedef struct {
+  __uint64_t magic;
+  __uint64_t env_flags;
+  __uint64_t exec_flags;
+  __uint64_t pid;
+  __uint64_t syscall_timeout_ms;
+  __uint64_t program_timeout_ms;
+  __uint64_t slowdown_scale;
+  __uint64_t prog_size;
+} execute_req;
+
+typedef struct {
+  __uint32_t magic;
+  __uint32_t done;
+  __uint32_t status;
+} execute_reply;
+
+// call_reply.flags
+const __uint32_t call_flag_executed = 1 << 0;
+const __uint32_t call_flag_finished = 1 << 1;
+const __uint32_t call_flag_blocked = 1 << 2;
+const __uint32_t call_flag_fault_injected = 1 << 3;
+
+typedef struct {
+  execute_reply header;
+  __uint32_t call_index;
+  __uint32_t call_num;
+  __uint32_t reserrno;
+  __uint32_t flags;
+  __uint32_t signal_size;
+  __uint32_t cover_size;
+  __uint32_t comps_size;
+  // signal/cover/comps follow
+} call_reply;
+
+enum {
+  KCOV_CMP_CONST = 1,
+  KCOV_CMP_SIZE1 = 0,
+  KCOV_CMP_SIZE2 = 2,
+  KCOV_CMP_SIZE4 = 4,
+  KCOV_CMP_SIZE8 = 6,
+  KCOV_CMP_SIZE_MASK = 6,
+};
+
+// struct kcov_comparison_t {
+// 	// Note: comparisons are always 64-bits regardless of kernel bitness.
+// 	__uint64_t type;
+// 	__uint64_t arg1;
+// 	__uint64_t arg2;
+// 	__uint64_t pc;
+
+// 	__uint32_t ignore() const;
+// 	void write();
+// 	__uint32_t operator==(const struct kcov_comparison_t& other) const;
+// 	__uint32_t operator<(const struct kcov_comparison_t& other) const;
+// };
+
+// typedef char kcov_comparison_size[sizeof(kcov_comparison_t) == 4 *
+// sizeof(__uint64_t) ? 1 : -1];
+
+struct feature_t {
+  const char *name;
+  void (*setup)();
+};
+
+#include "defs.h"
+#include "executor_ucos.h"
+#include "syscalls.h"
+
+#if GOOS_linux
+#include "executor_linux.h"
+#elif GOOS_fuchsia
+#include "executor_fuchsia.h"
+#elif GOOS_akaros
+#include "executor_akaros.h"
+#elif GOOS_freebsd || GOOS_netbsd || GOOS_openbsd
+#include "executor_bsd.h"
+#elif GOOS_darwin
+#include "executor_darwin.h"
+#elif GOOS_windows
+#include "executor_windows.h"
+#elif GOOS_test
+#include "executor_test.h"
+#elif GOOS_UCOS
+
+#endif
+/*
+*********************************************************************************************************
+*                                      LOCAL FUNCTION PROTOTYPES
+*********************************************************************************************************
+*/
+// extern call_t syscalls[264];
+static void receive_execute();
+static void reply_execute(int status);
+
+static NORETURN void fail(const char *err);
+
+static thread_t *schedule_call(int call_index, int call_num,
+                               __uint32_t colliding, __uint64_t copyout_index,
+                               __uint64_t num_args, __uint64_t *args,
+                               __uint64_t *pos, call_props_t call_props);
+static void handle_completion(thread_t *th);
+static void copyout_call_results(thread_t *th);
+static void write_call_output(thread_t *th, __uint32_t finished);
+static void write_extra_output();
+static void execute_call(thread_t *th);
+static void thread_create(thread_t *th, int id);
+static void *worker_thread(void *arg);
+static __uint64_t read_input(__uint64_t **input_posp, __uint32_t peek);
+static __uint64_t read_arg(__uint64_t **input_posp);
+static __uint64_t read_const_arg(__uint64_t **input_posp, __uint64_t *size_p,
+                                 __uint64_t *bf, __uint64_t *bf_off_p,
+                                 __uint64_t *bf_len_p);
+static __uint64_t read_result(__uint64_t **input_posp);
+static __uint64_t swap(__uint64_t v, __uint64_t size, __uint64_t bf);
+static void copyin(char *addr, __uint64_t val, __uint64_t size, __uint64_t bf,
+                   __uint64_t bf_off, __uint64_t bf_len);
+static __uint32_t copyout(char *addr, __uint64_t size, __uint64_t *res);
+static void setup_control_pipes();
+static void setup_features(char **enable, int n);
+static void execute_prog();
+
+void failmsg(const char *err, const char *msg, ...) {
+  // int e = errno;
+  // fprintf(stderr, "SYZFAIL: %s\n", err);
+  // if (msg) {
+  // 	va_list args;
+  // 	va_start(args, msg);
+  // 	vfprintf(stderr, msg, args);
+  // 	va_end(args);
+  // }
+  // fprintf(stderr, " (errno %d: %s)\n", e, strerror(e));
+  // if (current_thread && current_thread->soft_fail_state)
+  // 	return;
+  // return;
+}
+
+void fail(const char *err) { APP_TRACE_INFO((err, 0)); }
+
+void exitf(const char *msg, ...) {
+  // int e = errno;
+  // va_list args;
+  // va_start(args, msg);
+  // vfprintf(stderr, msg, args);
+  // va_end(args);
+  // fprintf(stderr, " (errno %d)\n", e);
+  // return;
+  // // doexit(0);
+}
+
+void debug(const char *msg, ...) {
+  // if (!flag_debug)
+  // 	return;
+  // int err = errno;
+  // va_list args;
+  // va_start(args, msg);
+  // vfprintf(stderr, msg, args);
+  // va_end(args);
+  // fflush(stderr);
+  // errno = err;
+}
+
+__uint64_t max_64(__uint64_t a, __uint64_t b) { return (a > b) ? a : b; }
+
+void setup_control_pipes() {
+  // if (dup2(0, kInPipeFd) < 0)
+  // 	fail("dup2(0, kInPipeFd) failed");
+  // if (dup2(1, kOutPipeFd) < 0)
+  // 	fail("dup2(1, kOutPipeFd) failed");
+  // if (dup2(2, 1) < 0)
+  // 	fail("dup2(2, 1) failed");
+  // // We used to close(0), but now we dup stderr to stdin to keep fd numbers
+  // // stable across executor and C programs generated by pkg/csource.
+  // if (dup2(2, 0) < 0)
+  // 	fail("dup2(2, 0) failed");
+}
+
+void parse_env_flags(__uint64_t flags) {
+  // Note: Values correspond to ordering in pkg/ipc/ipc.go, e.g.
+  // FlagSandboxNamespace
+  flag_debug = flags & (1 << 0);
+  flag_coverage = flags & (1 << 1);
+  if (flags & (1 << 2))
+    flag_sandbox_setuid = 1;
+  else if (flags & (1 << 3))
+    flag_sandbox_namespace = 1;
+  else if (flags & (1 << 4))
+    flag_sandbox_android = 1;
+  else
+    flag_sandbox_none = 1;
+  flag_extra_coverage = flags & (1 << 5);
+  flag_net_injection = flags & (1 << 6);
+  flag_net_devices = flags & (1 << 7);
+  flag_net_reset = flags & (1 << 8);
+  flag_cgroups = flags & (1 << 9);
+  flag_close_fds = flags & (1 << 10);
+  flag_devlink_pci = flags & (1 << 11);
+  flag_vhci_injection = flags & (1 << 12);
+  flag_wifi = flags & (1 << 13);
+}
+
+#if SYZ_EXECUTOR_USES_FORK_SERVER
+void receive_handshake() {
+  handshake_req req = {};
+  int n = read(kInPipeFd, &req, sizeof(req));
+  if (n != sizeof(req))
+    APP_TRACE_INFO(("handshake read failed", "read=%d", n));
+  if (req.magic != kInMagic)
+    APP_TRACE_INFO(("bad handshake magic", "magic=0x%llx", req.magic));
+  parse_env_flags(req.flags);
+  procid = req.pid;
+}
+
+void reply_handshake() {
+  handshake_reply reply = {};
+  reply.magic = kOutMagic;
+  if (write(kOutPipeFd, &reply, sizeof(reply)) != sizeof(reply))
+    fail("control pipe write failed");
+}
+#endif 
+void reply_execute(int status) {
+  // execute_reply reply = {};
+  // reply.magic = kOutMagic;
+  // reply.done = 1;
+  // reply.status = status;
+  // if (write(kOutPipeFd, &reply, sizeof(reply)) != sizeof(reply))
+  // 	fail("control pipe write failed");
+}
+
+ __uint16_t read_struct(__uint16_t **input_posp, __uint32_t peek) {
+  __uint16_t *input_pos = *input_posp;
+  if ((char *)input_pos >= input_data + kMaxInput)
+    APP_TRACE_INFO(("input command overflows input", "pos=%p: [%p:%p)\n", input_pos,
+            input_data, input_data + kMaxInput));
+  if (!peek)
+    *input_posp = input_pos + sizeof(syscall);
+  return *input_pos;
+}
+
+void execute_prog() {
+ 
+  // identify how many progs are there 
+  __uint64_t call_len = read_input(corpus_buffer, 0);
+  
+  for (int i = 0; i < call_len; ++i) {
+    syscall* current_prog = read_struct(corpus_buffer, 0);
+    // stuff call 
+    // parse_call();
+    // execute call
+    // execute_call();
+  }
+
+}
+
+
+// execute_one executes program stored in input_data.
+void execute_one() { 
+   
+  __uint64_t *input_pos = (__uint64_t *)input_data;
+  __uint64_t idx = 0;
+ 
+  int call_index = 0; 
+  for (int i = 0; i < 16	; ++i) {
+    APP_TRACE_INFO(("corpus_buffer[%d] = %d\n", i, corpus_buffer[i])); 
+  }
+  for (int i = 0; i < 8	; ++i) {  
+    APP_TRACE_INFO(("input_data[%d] = %d\n", i, input_data[i])); 
+  }
+  for (int i = 0; i < 8	; ++i) { 
+    APP_TRACE_INFO(("input_pos[%d] = %d\n", i, input_pos[i]));
+  }
+
+  for (;;) {
+    __uint64_t call_num = read_input(&input_pos, 0);
+    APP_TRACE_INFO(("call num = %lld\n", call_num));
+    if (call_num == instr_eof)
+      break;
+    if (call_num == instr_copyin) {
+      char *addr = (char *)read_input(&input_pos, 0);
+      __uint64_t typ = read_input(&input_pos, 0);
+      switch (typ) {
+      case arg_const: {
+        __uint64_t size, bf, bf_off, bf_len;
+        __uint64_t arg =
+            read_const_arg(&input_pos, &size, &bf, &bf_off, &bf_len);
+        copyin(addr, arg, size, bf, bf_off, bf_len);
+        break;
+      }
+      case arg_result: {
+        __uint64_t meta = read_input(&input_pos, 0);
+        __uint64_t size = meta & 0xff;
+        __uint64_t bf = meta >> 8;
+        __uint64_t val = read_result(&input_pos);
+        copyin(addr, val, size, bf, 0, 0);
+        break;
+      }
+      case arg_data: {
+        __uint64_t size = read_input(&input_pos, 0);
+        size &= ~(1ull << 63); // readable flag
+        // TODO
+        for (int i = 0; i < size; i++)
+          addr[i] = input_pos[i]; 
+        // Read out the data.
+        for (__uint64_t i = 0; i < (size + 7) / 8; i++)
+          read_input(&input_pos, 0);
+        break;
+      }
+      case arg_csum: {
+        debug_verbose("checksum found at %p\n", addr);
+        __uint64_t size = read_input(&input_pos, 0);
+        char *csum_addr = addr;
+        __uint64_t csum_kind = read_input(&input_pos, 0);
+        switch (csum_kind) {
+        case arg_csum_inet: {
+          if (size != 2)
+            APP_TRACE_INFO(("bag inet checksum size", "size=%llu\n", size));
+          debug_verbose("calculating checksum for %p\n", csum_addr);
+          struct csum_inet csum;
+          csum_inet_init(&csum);
+          __uint64_t chunks_num = read_input(&input_pos, 0);
+          __uint64_t chunk;
+          for (chunk = 0; chunk < chunks_num; chunk++) {
+            __uint64_t chunk_kind = read_input(&input_pos, 0);
+            __uint64_t chunk_value = read_input(&input_pos, 0);
+            __uint64_t chunk_size = read_input(&input_pos, 0);
+            switch (chunk_kind) {
+            case arg_csum_chunk_data:
+              debug_verbose("#%lld: data chunk, addr: %llx, size: %llu\n",
+                            chunk, chunk_value, chunk_size);
+              csum_inet_update(&csum, (const __uint8_t *)chunk_value,
+                               chunk_size);
+              // NONFAILING(csum_inet_update(&csum, (const
+              // __uint8_t*)chunk_value, chunk_size));
+              break;
+            case arg_csum_chunk_const:
+              if (chunk_size != 2 && chunk_size != 4 && chunk_size != 8)
+                APP_TRACE_INFO(("bad checksum const chunk size\n", "size=%lld\n",
+                        chunk_size));
+              // Here we assume that const values come to us big endian.
+              debug_verbose("#%lld: const chunk, value: %llx, size: %llu\n",
+                            chunk, chunk_value, chunk_size);
+              csum_inet_update(&csum, (const __uint8_t *)&chunk_value,
+                               chunk_size);
+              break;
+            default:
+              APP_TRACE_INFO(("bad checksum chunk kind\n", "kind=%llu\n", chunk_kind));
+            }
+          }
+          __uint16_t csum_value = csum_inet_digest(&csum);
+          debug_verbose("writing inet checksum %hx to %p\n", csum_value,
+                        csum_addr);
+          copyin(csum_addr, csum_value, 2, binary_format_native, 0, 0);
+          break;
+        }
+        default:
+          APP_TRACE_INFO(("bad checksum kind \n", "kind=%llu \n", csum_kind));
+        }
+        break;
+      }
+      default:
+        APP_TRACE_INFO(("bad argument type\n", "type=%llu \n", typ));
+      }
+      continue;
+    }
+    if (call_num == instr_copyout) {
+      read_input(&input_pos, 0); // index
+      read_input(&input_pos, 0); // addr
+      read_input(&input_pos, 0); // size
+      // The copyout will happen when/if the call completes.
+      continue;
+    }
+    if (call_num == instr_setprops) {
+      read_call_props_t(call_props, read_input(&input_pos, 0));
+      continue;
+    }
+
+    // Normal syscall.
+    if (call_num >= ARRAY_SIZE(syscalls))
+      APP_TRACE_INFO(("x", "call_num=%llu\n", call_num));
+    const call_t *call = &syscalls[call_num];
+    if (call->attrs.disabled)
+      APP_TRACE_INFO(("executing disabled syscall", "syscall=%s\n", call->name));
+    if (prog_extra_timeout < call->attrs.prog_timeout)
+      prog_extra_timeout = call->attrs.prog_timeout * slowdown_scale;
+
+    has_fault_injection |= (call_props.fail_nth > 0);
+    __uint64_t copyout_index = read_input(&input_pos, 0);
+    __uint64_t num_args = read_input(&input_pos, 0);
+    if (num_args > kMaxArgs)
+      APP_TRACE_INFO(("command has bad number of arguments \n", "args=%llu \n", num_args));
+    // __uint64_t args[kMaxArgs] = {};
+    __uint64_t args[kMaxArgs];
+    for (int i = 0; i < kMaxArgs; ++i) {
+      args[i] = 0;
+    }
+    for (__uint64_t i = 0; i < num_args; i++)
+      args[i] = read_arg(&input_pos);
+    for (__uint64_t i = num_args; i < kMaxArgs; i++)
+      args[i] = 0;
+    thread_t *th =
+        schedule_call(call_index++, call_num, colliding, copyout_index,
+                      num_args, args, input_pos, call_props);
+
+    if (colliding && (call_index % 2) == 0) {
+      // Don't wait for every other call.
+      // We already have results from the previous execution.
+    } else if (flag_threaded) {
+      // Wait for call completion.
+      __uint64_t timeout_ms =
+          syscall_timeout_ms + call->attrs.timeout * slowdown_scale;
+      // This is because of printing pre/post call. Ideally we print everything
+      // in the main thread and then remove this (would also avoid intermixed
+      // output).
+      if (flag_debug && timeout_ms < 1000)
+        timeout_ms = 1000;
+      if (event_timedwait(&th->done, timeout_ms))
+        handle_completion(th);
+
+      // Check if any of previous calls have completed.
+      for (int i = 0; i < kMaxThreads; i++) {
+        th = &threads[i];
+        if (th->executing && event_isset(&th->done))
+          handle_completion(th);
+      }
+    } else {
+      // Execute directly.
+      if (th != &threads[0])
+        fail("using non-main thread in non-thread mode");
+      event_reset(&th->ready);
+      execute_call(th);
+      event_set(&th->done);
+      handle_completion(th);
+    }
+    // memset(&call_props, 0, sizeof(call_props));
+  }
+ 
+    // Write output coverage for unfinished calls.
+  if (running > 0) {
+    for (int i = 0; i < kMaxThreads; i++) {
+      thread_t *th = &threads[i];
+      if (th->executing) { 
+        write_call_output(th, 0);
+      }
+    }
+  } 
+   
+  if (flag_collide && !colliding && !has_fault_injection && !collide) {
+    APP_TRACE_INFO(("enabling collider\n"));
+    collide = colliding = 1;
+    goto retry;
+  }
+}
+
+thread_t *schedule_call(int call_index, int call_num, __uint32_t colliding,
+                        __uint64_t copyout_index, __uint64_t num_args,
+                        __uint64_t *args, __uint64_t *pos,
+                        call_props_t call_props) {
+  // Find a spare thread to execute the call.
+  int i = 0;
+  for (; i < kMaxThreads; i++) {
+    thread_t *th = &threads[i];
+    if (!th->created)
+      thread_create(th, i);
+    if (event_isset(&th->done)) {
+      if (th->executing)
+        handle_completion(th);
+      break;
+    }
+  }
+  if (i == kMaxThreads) {
+    printf("out of threads");
+    // return 0;
+  }
+  thread_t *th = &threads[i];
+  if (event_isset(&th->ready) || !event_isset(&th->done) || th->executing)
+    APP_TRACE_INFO(("bad thread state in schedule", "ready=%d done=%d executing=%d",
+            event_isset(&th->ready), event_isset(&th->done), th->executing));
+  last_scheduled = th;
+  th->colliding = colliding;
+  th->copyout_pos = pos;
+  th->copyout_index = copyout_index;
+  event_reset(&th->done);
+  th->executing = 1;
+  th->call_index = call_index;
+  th->call_num = call_num;
+  th->num_args = num_args;
+  th->call_props = call_props;
+  for (int i = 0; i < kMaxArgs; i++)
+    th->args[i] = args[i];
+  event_set(&th->ready);
+  running++;
+  return th;
+}
+
+#if SYZ_EXECUTOR_USES_SHMEM
+template <typename cover_data_t>
+void write_coverage_signal(cover_t *cov, __uint32_t *signal_count_pos,
+                           __uint32_t *cover_count_pos) {
+  // Write out feedback signals.
+  // Currently it is code edges computed as xor of two subsequent basic block
+  // PCs.
+  cover_data_t *cover_data = (cover_data_t *)(cov->data + cov->data_offset);
+  __uint32_t nsig = 0;
+  cover_data_t prev_pc = 0;
+  __uint32_t prev_filter = 1;
+  for (__uint32_t i = 0; i < cov->size; i++) {
+    cover_data_t pc = cover_data[i] + cov->pc_offset;
+    __uint32_t sig = pc;
+    if (use_cover_edges(pc))
+      sig ^= hash(prev_pc);
+    __uint32_t filter = coverage_filter(pc);
+    // Ignore the edge only if both current and previous PCs are filtered out
+    // to capture all incoming and outcoming edges into the interesting code.
+    __uint32_t ignore = !filter && !prev_filter;
+    prev_pc = pc;
+    prev_filter = filter;
+    if (ignore || dedup(sig))
+      continue;
+    write_output(sig);
+    nsig++;
+  }
+  // Write out number of signals.
+  *signal_count_pos = nsig;
+
+  if (!flag_collect_cover)
+    return;
+  // Write out real coverage (basic block PCs).
+  __uint32_t cover_size = cov->size;
+  if (flag_dedup_cover) {
+    cover_data_t *end = cover_data + cover_size;
+    cover_unprotect(cov);
+    std::sort(cover_data, end);
+    cover_size = std::unique(cover_data, end) - cover_data;
+    cover_protect(cov);
+  }
+  // Truncate PCs to __uint32_t assuming that they fit into 32-bits.
+  // True for x86_64 and arm64 without KASLR.
+  for (__uint32_t i = 0; i < cover_size; i++)
+    write_output(cover_data[i] + cov->pc_offset);
+  *cover_count_pos = cover_size;
+}
+#endif
+
+void handle_completion(thread_t *th) {
+  if (event_isset(&th->ready) || !event_isset(&th->done) || !th->executing)
+    APP_TRACE_INFO(("bad thread state in completion", "ready=%d done=%d executing=%d",
+            event_isset(&th->ready), event_isset(&th->done), th->executing));
+  if (th->res != (intptr_t)-1)
+    copyout_call_results(th);
+  if (!collide && !th->colliding) {
+    write_call_output(th, 1);
+    write_extra_output();
+  }
+  th->executing = 0;
+  running--;
+  if (running < 0) { 
+    for (int i = 0; i < kMaxThreads; i++) {
+      thread_t *th1 = &threads[i]; 
+    }
+    exitf("negative running");
+  }
+}
+
+void copyout_call_results(thread_t *th) {
+  if (th->copyout_index != no_copyout) {
+    if (th->copyout_index >= kMaxCommands)
+      APP_TRACE_INFO(("result overflows kMaxCommands", "index=%lld\n", th->copyout_index));
+    results[th->copyout_index].executed = 1;
+    results[th->copyout_index].val = th->res;
+  }
+  for (__uint32_t done = 0; !done;) {
+    __uint64_t instr = read_input(&th->copyout_pos, 0);
+    switch (instr) {
+    case instr_copyout: {
+      __uint64_t index = read_input(&th->copyout_pos, 0);
+      if (index >= kMaxCommands)
+        APP_TRACE_INFO(("result overflows kMaxCommands", "index=%lld\n", index));
+      char *addr = (char *)read_input(&th->copyout_pos, 0);
+      __uint64_t size = read_input(&th->copyout_pos, 0);
+      __uint64_t val = 0;
+      if (copyout(addr, size, &val)) {
+        results[index].executed = 1;
+        results[index].val = val;
+      }
+      debug_verbose("copyout 0x%llx from %p\n", val, addr);
+      break;
+    }
+    default:
+      done = 1;
+      break;
+    }
+  }
+}
+
+void write_call_output(thread_t *th, __uint32_t finished) {
+  __uint32_t reserrno = 999;
+  const __uint32_t blocked = finished && th != last_scheduled;
+  __uint32_t call_flags =
+      call_flag_executed | (blocked ? call_flag_blocked : 0);
+  if (finished) {
+    reserrno = th->res != -1 ? 0 : th->reserrno;
+    call_flags |= call_flag_finished |
+                  (th->fault_injected ? call_flag_fault_injected : 0);
+  }
+#if SYZ_EXECUTOR_USES_SHMEM
+  write_output(th->call_index);
+  write_output(th->call_num);
+  write_output(reserrno);
+  write_output(call_flags);
+  __uint32_t *signal_count_pos = write_output(0); // filled in later
+  __uint32_t *cover_count_pos = write_output(0);  // filled in later
+  __uint32_t *comps_count_pos = write_output(0);  // filled in later
+
+  if (flag_comparisons) {
+    // Collect only the comparisons
+    __uint32_t ncomps = th->cov.size;
+    kcov_comparison_t *start =
+        (kcov_comparison_t *)(th->cov.data + sizeof(__uint64_t));
+    kcov_comparison_t *end = start + ncomps;
+    if ((char *)end > th->cov.data_end)
+      APP_TRACE_INFO(("too many comparisons", "ncomps=%u", ncomps));
+    cover_unprotect(&th->cov);
+    std::sort(start, end);
+    ncomps = std::unique(start, end) - start;
+    cover_protect(&th->cov);
+    __uint32_t comps_size = 0;
+    for (__uint32_t i = 0; i < ncomps; ++i) {
+      if (start[i].ignore())
+        continue;
+      comps_size++;
+      start[i].write();
+    }
+    // Write out number of comparisons.
+    *comps_count_pos = comps_size;
+  } else if (flag_coverage) {
+    if (is_kernel_64_bit)
+      write_coverage_signal<__uint64_t>(&th->cov, signal_count_pos,
+                                        cover_count_pos);
+    else
+      write_coverage_signal<__uint32_t>(&th->cov, signal_count_pos,
+                                        cover_count_pos);
+  }
+  debug_verbose("out #%u: index=%u num=%u errno=%d finished=%d blocked=%d "
+                "sig=%u cover=%u comps=%u\n",
+                completed, th->call_index, th->call_num, reserrno, finished,
+                blocked, *signal_count_pos, *cover_count_pos, *comps_count_pos);
+  completed++;
+  write_completed(completed);
+#else
+  call_reply reply;
+  reply.header.magic = kOutMagic;
+  reply.header.done = 0;
+  reply.header.status = 0;
+  reply.call_index = th->call_index;
+  reply.call_num = th->call_num;
+  reply.reserrno = reserrno;
+  reply.flags = call_flags;
+  reply.signal_size = 0;
+  reply.cover_size = 0;
+  reply.comps_size = 0;
+  // if (write(kOutPipeFd, &reply, sizeof(reply)) != sizeof(reply))
+  // 	fail("control pipe call write failed");
+  debug_verbose("out: index=%u num=%u errno=%d finished=%d blocked=%d\n",
+                th->call_index, th->call_num, reserrno, finished, blocked);
+#endif
+}
+
+void write_extra_output() {
+#if SYZ_EXECUTOR_USES_SHMEM
+  if (!flag_coverage || !flag_extra_coverage || flag_comparisons)
+    return;
+  cover_collect(&extra_cov);
+  if (!extra_cov.size)
+    return;
+  write_output(-1);                               // call index
+  write_output(-1);                               // call num
+  write_output(999);                              // errno
+  write_output(0);                                // call flags
+  __uint32_t *signal_count_pos = write_output(0); // filled in later
+  __uint32_t *cover_count_pos = write_output(0);  // filled in later
+  write_output(0);                                // comps_count_pos
+  if (is_kernel_64_bit)
+    write_coverage_signal<__uint64_t>(&extra_cov, signal_count_pos,
+                                      cover_count_pos);
+  else
+    write_coverage_signal<__uint32_t>(&extra_cov, signal_count_pos,
+                                      cover_count_pos);
+  cover_reset(&extra_cov);
+  debug_verbose("extra: sig=%u cover=%u\n", *signal_count_pos,
+                *cover_count_pos);
+  completed++;
+  write_completed(completed);
+#endif
+}
+
+void thread_create(thread_t *th, int id) {
+  th->created = 1;
+  th->id = id;
+  th->executing = 0;
+  event_init(&th->ready);
+  event_init(&th->done);
+  event_set(&th->done);
+  if (flag_threaded)
+    thread_start(worker_thread, th);
+}
+
+void *worker_thread(void *arg) {
+  thread_t *th = (thread_t *)arg;
+  current_thread = th;
+  // if (flag_coverage)
+  // 	cover_enable(&th->cov, flag_comparisons, 0);
+  for (;;) {
+    event_wait(&th->ready);
+    event_reset(&th->ready);
+    execute_call(th);
+    event_set(&th->done);
+  }
+  return 0;
+}
+
+void execute_call(thread_t *th) {
+  call_t *call = &syscalls[th->call_num];
+  APP_TRACE_INFO(("#%d [%llums] -> %s(", th->id, current_time_ms() - start_time_ms,
+        call->name));
+  for (int i = 0; i < th->num_args; i++) {
+    if (i != 0)
+      APP_TRACE_INFO((", "));
+    APP_TRACE_INFO(("0x%llx", (__uint64_t)th->args[i]));
+  }
+  APP_TRACE_INFO((")\n"));
+
+  int fail_fd = -1;
+  th->soft_fail_state = 0;
+  if (th->call_props.fail_nth > 0) {
+    if (collide)
+      APP_TRACE_INFO(("both collide and fault injection are enabled\n"));
+    fail_fd = inject_fault(th->call_props.fail_nth);
+    th->soft_fail_state = 1;
+  } 
+  th->res = -1;
+  int err_no = 14;
+  th->res = execute_syscall(call, th->args); 
+  th->reserrno = err_no; 
+  if ((th->res == -1 && th->reserrno == 0) || call->attrs.ignore_return)
+    th->reserrno = 22; 
+  th->soft_fail_state = 0; 
+  th->fault_injected = 0;
+
+  if (th->call_props.fail_nth > 0)
+    th->fault_injected = fault_injected(fail_fd);
+
+  APP_TRACE_INFO(("#%d [%llums] <- %s=0x%llx errno=%d ", th->id,
+        current_time_ms() - start_time_ms, call->name, (__uint64_t)th->res,
+        th->reserrno));
+  if (flag_coverage)
+    APP_TRACE_INFO(("cover=%u ", th->cov.size));
+  if (th->call_props.fail_nth > 0)
+    APP_TRACE_INFO(("fault=%d ", th->fault_injected));
+  APP_TRACE_INFO(("\n"));
+}
+
+void copyin_int_8(char *addr, __uint64_t val, __uint64_t bf, __uint64_t bf_off,
+                  __uint64_t bf_len) {
+  if (bf_off == 0 && bf_len == 0) {
+    *(__uint8_t *)addr = swap(val, sizeof(__uint8_t), bf);
+    return;
+  }
+  __uint8_t x = swap(*(__uint8_t *)addr, sizeof(__uint8_t), bf);
+  debug_verbose("copyin_int<%zu>: old x=0x%llx\n", sizeof(__uint8_t),
+                (__uint8_t)x);
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+  const __uint8_t shift = sizeof(__uint8_t) * CHAR_BIT - bf_off - bf_len;
+#else
+  const __uint8_t shift = bf_off;
+#endif
+  x = (x & ~BITMASK(shift, bf_len)) | ((val << shift) & BITMASK(shift, bf_len));
+  debug_verbose("copyin_int<%zu>: new x=0x%llx\n", sizeof(__uint8_t),
+                (__uint8_t)x);
+  *(__uint8_t *)addr = swap(x, sizeof(__uint8_t), bf);
+}
+
+void copyin_int_16(char *addr, __uint64_t val, __uint64_t bf, __uint64_t bf_off,
+                   __uint64_t bf_len) {
+  if (bf_off == 0 && bf_len == 0) {
+    *(__uint16_t *)addr = swap(val, sizeof(__uint16_t), bf);
+    return;
+  }
+  __uint16_t x = swap(*(__uint16_t *)addr, sizeof(__uint16_t), bf);
+  debug_verbose("copyin_int<%zu>: old x=0x%llx\n", sizeof(__uint16_t),
+                (__uint16_t)x);
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+  const __uint16_t shift = sizeof(__uint16_t) * CHAR_BIT - bf_off - bf_len;
+#else
+  const __uint16_t shift = bf_off;
+#endif
+  x = (x & ~BITMASK(shift, bf_len)) | ((val << shift) & BITMASK(shift, bf_len));
+  debug_verbose("copyin_int<%zu>: new x=0x%llx\n", sizeof(__uint16_t),
+                (__uint16_t)x);
+  *(__uint16_t *)addr = swap(x, sizeof(__uint16_t), bf);
+}
+
+void copyin_int_32(char *addr, __uint64_t val, __uint64_t bf, __uint64_t bf_off,
+                   __uint64_t bf_len) {
+  if (bf_off == 0 && bf_len == 0) {
+    *(__uint32_t *)addr = swap(val, sizeof(__uint32_t), bf);
+    return;
+  }
+  __uint32_t x = swap(*(__uint32_t *)addr, sizeof(__uint32_t), bf);
+  debug_verbose("copyin_int<%zu>: old x=0x%llx\n", sizeof(__uint32_t),
+                (__uint32_t)x);
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+  const __uint32_t shift = sizeof(__uint32_t) * CHAR_BIT - bf_off - bf_len;
+#else
+  const __uint32_t shift = bf_off;
+#endif
+  x = (x & ~BITMASK(shift, bf_len)) | ((val << shift) & BITMASK(shift, bf_len));
+  debug_verbose("copyin_int<%zu>: new x=0x%llx\n", sizeof(__uint32_t),
+                (__uint32_t)x);
+  *(__uint32_t *)addr = swap(x, sizeof(__uint32_t), bf);
+}
+
+void copyin_int_64(char *addr, __uint64_t val, __uint64_t bf, __uint64_t bf_off,
+                   __uint64_t bf_len) {
+  if (bf_off == 0 && bf_len == 0) {
+    *(__uint64_t *)addr = swap(val, sizeof(__uint64_t), bf);
+    return;
+  }
+  __uint64_t x = swap(*(__uint64_t *)addr, sizeof(__uint64_t), bf);
+  debug_verbose("copyin_int<%zu>: old x=0x%llx\n", sizeof(__uint64_t),
+                (__uint64_t)x);
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+  const __uint64_t shift = sizeof(__uint64_t) * CHAR_BIT - bf_off - bf_len;
+#else
+  const __uint64_t shift = bf_off;
+#endif
+  x = (x & ~BITMASK(shift, bf_len)) | ((val << shift) & BITMASK(shift, bf_len));
+  debug_verbose("copyin_int<%zu>: new x=0x%llx\n", sizeof(__uint64_t),
+                (__uint64_t)x);
+  *(__uint64_t *)addr = swap(x, sizeof(__uint64_t), bf);
+}
+
+void copyin(char *addr, __uint64_t val, __uint64_t size, __uint64_t bf,
+            __uint64_t bf_off, __uint64_t bf_len) {
+  debug_verbose(
+      "copyin: addr=%p val=0x%llx size=%llu bf=%llu bf_off=%llu bf_len=%llu\n",
+      addr, val, size, bf, bf_off, bf_len);
+  if (bf != binary_format_native && bf != binary_format_bigendian &&
+      (bf_off != 0 || bf_len != 0))
+    APP_TRACE_INFO(("bitmask for string format", "off=%llu, len=%llu\n", bf_off, bf_len));
+  switch (bf) {
+  case binary_format_native:
+  case binary_format_bigendian:
+    switch (size) {
+    case 1:
+      copyin_int_8(addr, val, bf, bf_off, bf_len);
+      break;
+    case 2:
+      copyin_int_16(addr, val, bf, bf_off, bf_len);
+      break;
+    case 4:
+      copyin_int_32(addr, val, bf, bf_off, bf_len);
+      break;
+    case 8:
+      copyin_int_64(addr, val, bf, bf_off, bf_len);
+      break;
+    default:
+      APP_TRACE_INFO(("copyin: bad argument size", "size=%llu\n", size));
+    }
+    break;
+  case binary_format_strdec:
+    if (size != 20)
+      APP_TRACE_INFO(("bad strdec size", "size=%llu\n", size));
+    // NONFAILING(sprintf((char*)addr, "%020llu", val));
+    break;
+  case binary_format_strhex:
+    if (size != 18)
+      APP_TRACE_INFO(("bad strhex size", "size=%llu\n", size));
+    // NONFAILING(sprintf((char*)addr, "0x%016llx", val));
+    break;
+  case binary_format_stroct:
+    if (size != 23)
+      APP_TRACE_INFO(("bad stroct size", "size=%llu\n", size));
+    // NONFAILING(sprintf((char*)addr, "%023llo", val));
+    break;
+  default:
+    APP_TRACE_INFO(("unknown binary format", "format=%llu\n", bf));
+  }
+}
+
+__uint32_t copyout(char *addr, __uint64_t size, __uint64_t *res) {
+  int flag = 0;
+  switch (size) {
+  case 1:
+    *res = *(__uint8_t *)addr;
+    break;
+  case 2:
+    *res = *(__uint16_t *)addr;
+    break;
+  case 4:
+    *res = *(__uint32_t *)addr;
+    break;
+  case 8:
+    *res = *(__uint64_t *)addr;
+    break;
+  default:
+    flag = 1;
+    // APP_TRACE_INFO(("copyout: bad argument size", "size=%llu", size);
+  }
+  __uint64_t *result = (flag == 1) ? 0 : res;
+  return result;
+  // return NONFAILING(result);
+}
+
+__uint64_t read_arg(__uint64_t **input_posp) {
+  __uint64_t typ = read_input(input_posp, 0);
+  switch (typ) {
+  case arg_const: {
+    __uint64_t size, bf, bf_off, bf_len;
+    __uint64_t val = read_const_arg(input_posp, &size, &bf, &bf_off, &bf_len);
+    if (bf != binary_format_native && bf != binary_format_bigendian)
+      APP_TRACE_INFO(("bad argument binary format\n", "format=%llu\n", bf));
+    if (bf_off != 0 || bf_len != 0)
+      APP_TRACE_INFO(("bad argument bitfield\n", "off=%llu, len=%llu\n", bf_off, bf_len));
+    return swap(val, size, bf);
+  }
+  case arg_result: {
+    __uint64_t meta = read_input(input_posp, 0);
+    __uint64_t bf = meta >> 8;
+    if (bf != binary_format_native)
+      APP_TRACE_INFO(("bad result argument format\n", "format=%llu\n", bf));
+    return read_result(input_posp);
+  }
+  default:
+    APP_TRACE_INFO(("bad argument type\n", "type=%llu\n", typ));
+  }
+  return 0;
+}
+
+__uint64_t swap(__uint64_t v, __uint64_t size, __uint64_t bf) {
+  // if (bf == binary_format_native)
+  return v;
+  // if (bf != binary_format_bigendian)
+  // 	APP_TRACE_INFO(("bad binary format in swap", "format=%llu", bf);
+  // switch (size) {
+  // case 2:
+  // 	return htobe16(v);
+  // case 4:
+  // 	return htobe32(v);
+  // case 8:
+  // 	return htobe64(v);
+  // default:
+  // 	APP_TRACE_INFO(("bad big-endian int size", "size=%llu", size);
+  // }
+}
+
+__uint64_t read_const_arg(__uint64_t **input_posp, __uint64_t *size_p,
+                          __uint64_t *bf_p, __uint64_t *bf_off_p,
+                          __uint64_t *bf_len_p) {
+  __uint64_t meta = read_input(input_posp, 0);
+  __uint64_t val = read_input(input_posp, 0);
+  *size_p = meta & 0xff;
+  __uint64_t bf = (meta >> 8) & 0xff;
+  *bf_off_p = (meta >> 16) & 0xff;
+  *bf_len_p = (meta >> 24) & 0xff;
+  __uint64_t pid_stride = meta >> 32;
+  val += pid_stride * procid;
+  *bf_p = bf;
+  return val;
+}
+
+__uint64_t read_result(__uint64_t **input_posp) {
+  __uint64_t idx = read_input(input_posp, 0);
+  __uint64_t op_div = read_input(input_posp, 0);
+  __uint64_t op_add = read_input(input_posp, 0);
+  __uint64_t arg = read_input(input_posp, 0);
+  if (idx >= kMaxCommands)
+    APP_TRACE_INFO(("command refers to bad result", "result=%lld\n", idx));
+  if (results[idx].executed) {
+    arg = results[idx].val;
+    if (op_div != 0)
+      arg = arg / op_div;
+    arg += op_add;
+  }
+  return arg;
+}
+
+__uint8_t read_input_8(__uint8_t **input_posp, __uint32_t peek) {
+  __uint8_t *input_pos = *input_posp;
+  if ((char *)input_pos >= input_data + kMaxInput)
+    APP_TRACE_INFO(("input command overflows input", "pos=%p: [%p:%p)\n", input_pos,
+            input_data, input_data + kMaxInput));
+  if (!peek)
+    *input_posp = input_pos + 1;
+  return *input_pos;
+}
+
+__uint64_t read_input(__uint64_t **input_posp, __uint32_t peek) {
+  __uint64_t *input_pos = *input_posp;
+  if ((char *)input_pos >= input_data + kMaxInput)
+    APP_TRACE_INFO(("input command overflows input", "pos=%p: [%p:%p)\n", input_pos,
+            input_data, input_data + kMaxInput));
+  if (!peek)
+    *input_posp = input_pos + 1;
+  return *input_pos;
+}
+
+void setup_features(char **enable, int n) {
+  // This does any one-time setup for the requested features on the machine.
+  // Note: this can be called multiple times and must be idempotent.
+  flag_debug = 1;
+#if SYZ_HAVE_FEATURES
+  setup_sysctl();
+  setup_cgroups();
+#endif
+  for (int i = 0; i < n; i++) {
+    __uint32_t found = 0;
+#if SYZ_HAVE_FEATURES
+    for (unsigned f = 0; f < sizeof(features) / sizeof(features[0]); f++) {
+      if (strcmp(enable[i], features[f].name) == 0) {
+        features[f].setup();
+        found = 1;
+        break;
+      }
+    }
+#endif
+    if (!found)
+      APP_TRACE_INFO(("setup features: unknown feature\n"));
+  }
+}
+
+void debug_dump_data(const char *data, int length);
+
+void debug_dump_data(const char *data, int length) {
+  if (!flag_debug)
+    return;
+  int i = 0;
+  for (; i < length; i++) {
+    APP_TRACE_INFO(("%02x ", data[i] & 0xff));
+    if (i % 16 == 15)
+      APP_TRACE_INFO(("\n"));
+  }
+  if (i % 16 != 0)
+    APP_TRACE_INFO(("\n"));
+}
+
+static void StartupTask(void *p_arg);
+
+long long __aeabi_ldiv0(long long r) {
+  while (1)
+    ;
+}
+
+void _putchar(char character) { BSP_Ser_WrByte(character); }
+
+/*
+*********************************************************************************************************
+*                                                main()
+*
+* Description : This is the standard entry point for C code.  It is assumed that
+*your code will call main() once you have performed all necessary
+*initialization.
+*
+* Arguments   : none
+*
+* Returns     : none
+*********************************************************************************************************
+*/
+
+ void kernel_print(){
+  //  int a = 1, b = 2;
+  //  int c = a+b;
+  //  return c;
+   APP_TRACE_INFO(("\n\n********************start************************\n\n"));
+ }
+
+//  extern void sancov_module_ctor_trace_pc_guard_init();
+//  extern void sancov_module_ctor_8bit_counters();
+//  extern void sancov_module_ctor_bool_flag();
+
+//  void ucos_sanitizer_init(){
+//  sancov_module_ctor_trace_pc_guard_init();
+//  sancov_module_ctor_8bit_counters();
+//  sancov_module_ctor_bool_flag();
+//  }
+// 80000818
+static void(*sancov_ctor_func)() = 0x80000818;
+
+int main(void) { 
+  kernel_print();
+  sancov_ctor_func();
+  kernel_print();
+  // ucos_sanitizer_init();
+  OS_ERR os_err;
+
+  BSP_SysInit(); /* Initialize the main clock                            */
+  BSP_IntInit(); /* Initialize RAM interrupt vector table                */
+  BSP_OS_TickInit(OSCfg_TickRate_Hz); /* Initialize kernel tick timer */
+
+  Mem_Init();   /* Initialize Memory Managment Module                   */
+  CPU_IntDis(); /* Disable all Interrupts                               */
+  CPU_Init();   /* Initialize the uC/CPU services                       */
+
+  OSInit(&os_err); /* Init uC/OS-III.                                      */
+  if (os_err != OS_ERR_NONE) {
+    while (1)
+      ;
+  } 
+
+  App_OS_SetAllHooks();
+  OSTaskCreate(&StartupTaskTCB, /* Create the start task */
+               "Startup Task", StartupTask, 0, APP_CFG_STARTUP_TASK_PRIO,
+               &StartupTaskStk[0u], APP_CFG_TASK_STARTUP_STK_SIZE / 10u,
+               APP_CFG_TASK_STARTUP_STK_SIZE, 0u, 0u, 0,
+               (OS_OPT_TASK_STK_CHK | OS_OPT_TASK_STK_CLR), &os_err);
+  if (os_err != OS_ERR_NONE) {
+    while (1)
+      ;
+  }
+
+  OSStart(&os_err); /* Start multitasking (i.e. give control to uC/OS-III). */
+
+  while (DEF_ON) {
+    ;
+  }
+}
+
+static void StartupTask(void *p_arg) {
+  OS_ERR os_err;
+#if (APP_CFG_TCPIP_EN > 0u)
+  CPU_BOOLEAN status;
+#endif
+  (void)p_arg;
+
+  OS_TRACE_INIT();
+
+  BSP_OS_TickEnable(); /* Enable the tick timer and interrupt */
+
+#if OS_CFG_STAT_TASK_EN > 0u
+  OSStatTaskCPUUsageInit(
+      &os_err); /* Compute CPU capacity with no task running            */
+#endif
+
+  while (DEF_TRUE) {	 
+    int idx = 0;
+    // for (int i = 63; i < MAX_PROG_SIZE; ++i) {
+    for (int i = 0; i < MAX_PROG_SIZE; ++i) {
+      input_data[idx++]  = corpus_buffer[i];
+    }
+ 
+    execute_one(); 
+
+    OSTimeDlyHMSM(0u, 0u, 1u, 0u, OS_OPT_TIME_HMSM_STRICT, &os_err);
+  }
+} 
+
+
+static intptr_t call_execute(int sid, int cid, intptr_t a[kMaxArgs], intptr_t idx[kMaxArgs]) {
+
+    call_t *call = &syscalls[cid];
+    
+    // replace struct pointer
+    for (int i = 0; i < kMaxArgs; ++i) {
+        if (idx[i] == "0xff") {
+            a[i] = struct_set[i];
+        }
+    }
+
+    intptr_t res = call->call(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12]);
+    
+    // TODO deal_res
+    // if (res == 0xffffffff)
+    //     res[i] = (intptr_t)-1;
+    return res;
+}

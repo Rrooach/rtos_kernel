@@ -1,0 +1,7 @@
+Remote debugging using :8899
+prvCheckTasksWaitingTermination () at /root/fuzz/kernel/FreeRTOS/FreeRTOS/Source/tasks.c:3699
+3699	            while(Exception ignored in: <gdb._GdbOutputFile object at 0x7f8c3830c1c0>
+Traceback (most recent call last):
+  File "/usr/share/gdb/python/gdb/__init__.py", line 43, in flush
+    def flush(self):
+KeyboardInterrupt: 

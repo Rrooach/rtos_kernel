@@ -1,0 +1,7 @@
+Two floder: FREERTOS and FREERTOS-old
+
+build target at Demo/RISCV-QEMU-GCC
+
+make debug=1
+
+

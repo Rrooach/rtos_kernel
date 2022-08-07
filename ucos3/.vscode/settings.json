@@ -1,0 +1,32 @@
+{
+    "files.associations": {
+        "syscall.h": "c",
+        "setjmp.h": "c",
+        "common.h": "c",
+        "syscalls.h": "c",
+        "net_arp.h": "c",
+        "net_bsd.h": "c",
+        "array": "c",
+        "hash_map": "c",
+        "*.tcc": "c",
+        "string": "c",
+        "unordered_map": "c",
+        "memory": "c",
+        "optional": "c",
+        "string_view": "c",
+        "fstream": "c",
+        "istream": "c",
+        "ostream": "c",
+        "sstream": "c",
+        "streambuf": "c",
+        "functional": "c",
+        "tuple": "c",
+        "deque": "c",
+        "list": "c",
+        "vector": "c",
+        "executor_ucos.h": "c",
+        "cpu_core.h": "c",
+        "lib_mem.h": "c",
+        "bsp_os.h": "c"
+    }
+}

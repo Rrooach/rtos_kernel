@@ -1,0 +1,1131 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Plist HTML Viewer</title>
+
+    <meta charset="UTF-8">
+
+    <style type="text/css">
+      .severity-low {
+  background-color: #669603;
+}
+
+.severity-low:after {
+  content : 'L';
+}
+
+.severity-unspecified {
+  background-color: #666666;
+}
+
+.severity-unspecified:after {
+  content : 'U';
+}
+
+.severity-style {
+  background-color: #9932cc;
+}
+
+.severity-style:after {
+  content : 'S';
+}
+
+.severity-medium {
+  background-color: #a9d323;
+  color: black;
+}
+
+.severity-medium:after {
+  content : 'M';
+}
+
+.severity-high {
+  background-color: #ffa800;
+}
+
+.severity-high:after {
+  content : 'H';
+}
+
+.severity-critical {
+  background-color: #e92625;
+}
+
+.severity-critical:after {
+  content : 'C';
+}
+
+i[class*="severity-"] {
+  line-height: normal;
+  text-transform: capitalize;
+  font-size: 0.8em;
+  font-weight: bold;
+  color: white;
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  text-align: center;
+  font-family: sans-serif;
+}
+
+      html, body {
+  width: 100%;
+  height: 100%;
+  padding: 0px;
+  margin: 0px;
+}
+
+div.container {
+  padding: 10px;
+}
+
+#content {
+  height: 100%;
+  display: block;
+  overflow: hidden;
+}
+
+#content > div {
+  margin: 10px;
+  border: 1px solid #ddd;
+  border-radius: 3px;
+  height: 97%;
+}
+
+#side-bar {
+  overflow: auto;
+}
+
+#editor-wrapper {
+  overflow: hidden;
+}
+
+.button {
+  background-color: #f1f1f1;
+  text-decoration: none;
+  display: inline-block;
+  padding: 8px 16px;
+  color: black;
+  cursor: pointer;
+}
+
+.button:hover {
+  background-color: #ddd;
+  color: black;
+}
+
+.review-status {
+  color: white;
+  text-align: center;
+}
+
+.review-status-confirmed {
+  background-color: #e92625;
+}
+
+.review-status-false-positive {
+  background-color: grey;
+}
+
+.review-status-intentional {
+  background-color: #669603;
+}
+
+      table th {
+  font-size: 1.2em;
+  color: #fff;
+  line-height: 1.4;
+  background-color: #007ea7;
+}
+
+table th.active,
+table th.sortable:hover {
+  cursor: pointer;
+  background-color: #2da6ce;
+}
+
+table tr:nth-child(even) {
+  background-color: #f5f5f5;
+}
+
+table tr > td {
+  padding: 5px;
+}
+
+      #report-list {
+  width: 100%;
+}
+
+#report-list .bug-path-length {
+  width: 5%;
+  text-align: center;
+}
+
+#report-list .severity {
+  text-align: center;
+}
+
+    </style>
+
+    <script>
+      function setNonCompatibleBrowserMessage() {
+  document.body.innerHTML =
+    '<h2 style="margin-left: 20px;">Your browser is not compatible with CodeChecker Viewer!</h2> \
+     <p style="margin-left: 20px;">The version required for the following browsers are:</p> \
+     <ul style="margin-left: 20px;"> \
+     <li>Internet Explorer: version 9 or newer</li> \
+     <li>Firefox: version 22.0 or newer</li> \
+     </ul>';
+}
+
+// http://stackoverflow.com/questions/5916900/how-can-you-detect-the-version-of-a-browser
+var browserVersion = (function(){
+  var ua = navigator.userAgent, tem,
+    M = ua.match(/(opera|chrome|safari|firefox|msie|trident(?=\/))\/?\s*(\d+)/i) || [];
+
+  if (/trident/i.test(M[1])) {
+    tem = /\brv[ :]+(\d+)/g.exec(ua) || [];
+    return 'IE ' + (tem[1] || '');
+  }
+
+  if (M[1] === 'Chrome') {
+    tem = ua.match(/\b(OPR|Edge)\/(\d+)/);
+    if (tem != null) return tem.slice(1).join(' ').replace('OPR', 'Opera');
+  }
+
+  M = M[2] ? [M[1], M[2]] : [navigator.appName, navigator.appVersion, '-?'];
+  if ((tem = ua.match(/version\/(\d+)/i)) != null) M.splice(1, 1, tem[1]);
+    return M.join(' ');
+})();
+
+var pos = browserVersion.indexOf(' ');
+var browser = browserVersion.substr(0, pos);
+var version = parseInt(browserVersion.substr(pos + 1));
+
+var browserCompatible
+  = browser === 'Firefox'
+  ? version >= 22
+  : browser === 'IE'
+  ? version >= 9
+  : true;
+
+      // -------------------------------------------------------------------------
+//  Part of the CodeChecker project, under the Apache License v2.0 with
+//  LLVM Exceptions. See LICENSE for license information.
+//  SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// -------------------------------------------------------------------------
+
+var BugList = {
+
+  init : function () {
+    this.initTableSort();
+    this.initBugPathLength();
+    this.initByUrl();
+  },
+
+  initTableSort : function () {
+    var that = this;
+
+    var table = document.getElementById('report-list');
+    table.querySelectorAll('th').forEach(function (column) {
+      if (that.canSort(column.id)) {
+        column.addEventListener('click', function () {
+          that.sort(column.id);
+        });
+        column.classList.add('sortable');
+      }
+    });
+  },
+
+  initBugPathLength : function () {
+    var that = this;
+
+    document.querySelectorAll('.bug-path-length').forEach(
+    function (widget) {
+      widget.style.backgroundColor =
+        that.generateRedGreenGradientColor(widget.innerHTML, 20, 0.5);
+    });
+  },
+
+  initByUrl : function () {
+    var state = {};
+    window.location.hash.substr(1).split('&').forEach(function (s) {
+      var parts = s.split('=');
+      state[parts[0]] = parts[1];
+    });
+
+    var column = state['sort'] ? state['sort'] : 'file-path';
+    var asc = state['asc'] ? !!parseInt(state['asc']) : true;
+    this.sort(column, asc);
+  },
+
+  generateRedGreenGradientColor : function (value, max, opacity) {
+    var red   = (255 * value) / max;
+    var green = (255 * (max - value)) / max;
+    var blue  = 0;
+    return 'rgba(' + parseInt(red) + ',' + parseInt(green) + ',' + blue
+      + ',' + opacity + ')';
+  },
+
+  canSort : function (columnId) {
+    return columnId === 'report-id' ||
+           columnId === 'file-path' ||
+           columnId === 'severity' ||
+           columnId === 'checker-name' ||
+           columnId === 'message' ||
+           columnId === 'bug-path-length' ||
+           columnId === 'review-status';
+  },
+
+  compare : function (columnId, a, b, asc) {
+    switch (columnId) {
+      case 'report-id':
+      case 'bug-path-length':
+        return asc
+          ? parseInt(a.innerHTML) > parseInt(b.innerHTML)
+          : parseInt(a.innerHTML) < parseInt(b.innerHTML);
+
+      case 'file-path':
+        var fileA = a.getAttribute('file');
+        var fileB = b.getAttribute('file');
+        var lineA = parseInt(a.getAttribute('line'));
+        var lineB = parseInt(b.getAttribute('line'));
+
+        if (asc) {
+          if (fileA > fileB) {
+            return true;
+          } else if (fileA === fileB) {
+            return lineA > lineB ? true : false;
+          } else {
+            return false;
+          }
+        } else {
+          if (fileA < fileB) {
+            return true;
+          } else if (fileA === fileB) {
+            return lineA < lineB ? true : false;
+          } else {
+            return false;
+          }
+        }
+
+      case 'severity':
+        return asc
+          ? a.getAttribute('severity') > b.getAttribute('severity')
+          : a.getAttribute('severity') < b.getAttribute('severity');
+
+      default:
+        return asc
+          ? a.innerHTML.toLowerCase() > b.innerHTML.toLowerCase()
+          : a.innerHTML.toLowerCase() < b.innerHTML.toLowerCase();
+    }
+  },
+
+  sort : function (columnId, asc) {
+    var rows = null,
+        switching = true,
+        i, j, x, y, minIdx;
+
+    var table = document.getElementById('report-list');
+    var column = document.getElementById(columnId);
+    var cellIndex = column.cellIndex;
+
+    if (asc === undefined) {
+      asc = column.getAttribute('sort') === 'desc' ? false : true;
+    }
+
+    var n = table.rows.length;
+    for (i = 1; i < n - 1; i++)
+    {
+      minIdx = i;
+      for (j = i + 1; j < n; j++) {
+        x = table.rows[minIdx].getElementsByTagName('td')[cellIndex];
+        y = table.rows[j].getElementsByTagName('td')[cellIndex];
+        if (this.compare(columnId, x, y, asc)) {
+          minIdx = j;
+        }
+      }
+
+      if (minIdx !== i) {
+        table.rows[i].parentNode.insertBefore(
+          table.rows[minIdx], table.rows[i]);
+      }
+    }
+
+    table.querySelectorAll('th').forEach(function (column) {
+      column.removeAttribute('sort');
+      column.classList.remove('active');
+    });
+
+    column.classList.add('active');
+    column.setAttribute('sort', asc ? 'desc' : 'asc');
+    window.location.hash = '#sort=' + columnId + '&asc=' + (asc ? 1 : 0);
+  }
+};
+
+
+      window.onload = function () {
+        if (!browserCompatible) {
+          setNonCompatibleBrowserMessage();
+        } else {
+          BugList.init()
+        }
+      }
+    </script>
+  </head>
+  <body>
+  <div class="container">
+    <a href="statistics.html" class="button">Go To Statistics</a>
+    <table id="report-list">
+      
+                <tr>
+                  <th id="report-id">&nbsp;</th>
+                  <th id="file-path">File</th>
+                  <th id="severity">Severity</th>
+                  <th id="checker-name">Checker name</th>
+                  <th id="message">Message</th>
+                  <th id="bug-path-length">Bug path length</th>
+                  <th id="review-status">Review status</th>
+                </tr>
+                  <tr>
+                    <td>1</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/arch/x86/core/cpuid.c" line="7">
+                      <a href="cpuid.c_clang-tidy_043fa4928c34a7cff75ee6cc50fe12d4.plist.html#reportHash=f23fb145a5c6deb1dba9446b97e387c3">
+                        /root/fuzz/kernel/zephyrproject/zephyr/arch/x86/core/cpuid.c @ Line&nbsp;7
+                      </a>
+                    </td>
+                    <td class="severity" severity="critical">
+                      <i class="severity-critical"
+                         title="critical"></i>
+                    </td>
+                    <td>clang-diagnostic-error</td>
+                    <td>'cpuid.h' file not found</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>2</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/drivers/interrupt_controller/intc_ioapic.c" line="448">
+                      <a href="intc_ioapic.c_clang-tidy_3c5816227af2b9bb8ee05574f6548151.plist.html#reportHash=284366be1ac91f30f01c365b6ff04f57">
+                        /root/fuzz/kernel/zephyrproject/zephyr/drivers/interrupt_controller/intc_ioapic.c @ Line&nbsp;448
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'uint32_t' (aka 'unsigned int') conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>3</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/drivers/interrupt_controller/intc_ioapic.c" line="473">
+                      <a href="intc_ioapic.c_clang-tidy_3c5816227af2b9bb8ee05574f6548151.plist.html#reportHash=9c033b1b1dcba846bb7af1e10c3638fd">
+                        /root/fuzz/kernel/zephyrproject/zephyr/drivers/interrupt_controller/intc_ioapic.c @ Line&nbsp;473
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'uint32_t' (aka 'unsigned int') conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>4</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/drivers/interrupt_controller/intc_loapic.c" line="150">
+                      <a href="intc_loapic.c_clang-tidy_0f9d1b3805a78406a3cede979ed886ba.plist.html#reportHash=1beab4d1e1c96cde474f086b67e3aa43">
+                        /root/fuzz/kernel/zephyrproject/zephyr/drivers/interrupt_controller/intc_loapic.c @ Line&nbsp;150
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/misc-redundant-expression.html" target="_blank">misc-redundant-expression</a></td>
+                    <td>operator has equivalent nested operands</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>5</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/drivers/interrupt_controller/intc_loapic.c" line="157">
+                      <a href="intc_loapic.c_clang-tidy_0f9d1b3805a78406a3cede979ed886ba.plist.html#reportHash=1beab4d1e1c96cde474f086b67e3aa43">
+                        /root/fuzz/kernel/zephyrproject/zephyr/drivers/interrupt_controller/intc_loapic.c @ Line&nbsp;157
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/misc-redundant-expression.html" target="_blank">misc-redundant-expression</a></td>
+                    <td>operator has equivalent nested operands</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>6</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/include/zephyr/kernel_includes.h" line="16">
+                      <a href="early_serial.c_clang-tidy_41c4a8632613be46432158c072b9d627.plist.html#reportHash=2d271937ce093663441468918a1f93bc">
+                        /root/fuzz/kernel/zephyrproject/zephyr/include/zephyr/kernel_includes.h @ Line&nbsp;16
+                      </a>
+                    </td>
+                    <td class="severity" severity="critical">
+                      <i class="severity-critical"
+                         title="critical"></i>
+                    </td>
+                    <td>clang-diagnostic-error</td>
+                    <td>'stddef.h' file not found</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>7</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/include/zephyr/sys/printk.h" line="12">
+                      <a href="assert.c_clang-tidy_32b554392c75108cafc50b4ed9d742eb.plist.html#reportHash=65494ec8f31d4dcf01186141de13fdb0">
+                        /root/fuzz/kernel/zephyrproject/zephyr/include/zephyr/sys/printk.h @ Line&nbsp;12
+                      </a>
+                    </td>
+                    <td class="severity" severity="critical">
+                      <i class="severity-critical"
+                         title="critical"></i>
+                    </td>
+                    <td>clang-diagnostic-error</td>
+                    <td>'stddef.h' file not found</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>8</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/include/zephyr/sys/sys_heap.h" line="9">
+                      <a href="heap.c_clang-tidy_2713ad63e84a341a008b4f7b57a3f81c.plist.html#reportHash=82cda8ee15596eb37cf0fd096bdca7a9">
+                        /root/fuzz/kernel/zephyrproject/zephyr/include/zephyr/sys/sys_heap.h @ Line&nbsp;9
+                      </a>
+                    </td>
+                    <td class="severity" severity="critical">
+                      <i class="severity-critical"
+                         title="critical"></i>
+                    </td>
+                    <td>clang-diagnostic-error</td>
+                    <td>'stddef.h' file not found</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>9</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/include/zephyr/types.h" line="10">
+                      <a href="strtoull.c_clang-tidy_5eb336112dc75d42e05ef6b8668fd298.plist.html#reportHash=2e84c2835c353577266abd57eee924fe">
+                        /root/fuzz/kernel/zephyrproject/zephyr/include/zephyr/types.h @ Line&nbsp;10
+                      </a>
+                    </td>
+                    <td class="severity" severity="critical">
+                      <i class="severity-critical"
+                         title="critical"></i>
+                    </td>
+                    <td>clang-diagnostic-error</td>
+                    <td>'stddef.h' file not found</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>10</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/kernel/mutex.c" line="254">
+                      <a href="mutex.c_clang-tidy_08f58b2afa995a809a43d6af48aa5d93.plist.html#reportHash=47cb8ee6f34e772988e060f25c7c030d">
+                        /root/fuzz/kernel/zephyrproject/zephyr/kernel/mutex.c @ Line&nbsp;254
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'int' conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>11</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/kernel/sched.c" line="97">
+                      <a href="sched.c_clang-tidy_048a2bd183f7ae24ab5fb9e3718ae827.plist.html#reportHash=fcb5ffcb182347b9d898f19ade2f940a">
+                        /root/fuzz/kernel/zephyrproject/zephyr/kernel/sched.c @ Line&nbsp;97
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'int32_t' (aka 'int') conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>12</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/kernel/sched.c" line="98">
+                      <a href="sched.c_clang-tidy_048a2bd183f7ae24ab5fb9e3718ae827.plist.html#reportHash=b91c2c0e255a01d6324fb92f49ea9c68">
+                        /root/fuzz/kernel/zephyrproject/zephyr/kernel/sched.c @ Line&nbsp;98
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'int32_t' (aka 'int') conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>13</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/include/stdio.h" line="13">
+                      <a href="stdout_console.c_clang-tidy_56b1d64fee6128172960ae1387bee32d.plist.html#reportHash=e84cd8f9f70490c9f8fe8b58df1a6374">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/include/stdio.h @ Line&nbsp;13
+                      </a>
+                    </td>
+                    <td class="severity" severity="critical">
+                      <i class="severity-critical"
+                         title="critical"></i>
+                    </td>
+                    <td>clang-diagnostic-error</td>
+                    <td>'stdarg.h' file not found</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>14</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/include/stdlib.h" line="12">
+                      <a href="abort.c_clang-tidy_f7444c9e44083b26f7d61d7138b513d3.plist.html#reportHash=0e482428e1e2e8b4b7d1d58ffc0d94b0">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/include/stdlib.h @ Line&nbsp;12
+                      </a>
+                    </td>
+                    <td class="severity" severity="critical">
+                      <i class="severity-critical"
+                         title="critical"></i>
+                    </td>
+                    <td>clang-diagnostic-error</td>
+                    <td>'stddef.h' file not found</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>15</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/include/string.h" line="12">
+                      <a href="device.c_clang-tidy_bb735883f9a5273c7c6e2006850b1b29.plist.html#reportHash=81ce9191b2e4abe32d0cd06df2a23115">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/include/string.h @ Line&nbsp;12
+                      </a>
+                    </td>
+                    <td class="severity" severity="critical">
+                      <i class="severity-critical"
+                         title="critical"></i>
+                    </td>
+                    <td>clang-diagnostic-error</td>
+                    <td>'stddef.h' file not found</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>16</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/qsort.c" line="7">
+                      <a href="qsort.c_clang-tidy_223a49a4532031958b1aec419d69ba9e.plist.html#reportHash=5345e225e5985437256fdcc00209fae9">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/qsort.c @ Line&nbsp;7
+                      </a>
+                    </td>
+                    <td class="severity" severity="critical">
+                      <i class="severity-critical"
+                         title="critical"></i>
+                    </td>
+                    <td>clang-diagnostic-error</td>
+                    <td>'stddef.h' file not found</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>17</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtol.c" line="59">
+                      <a href="strtol.c_clang-tidy_17d5635b77bf6ee544f1ebf8a7cb1789.plist.html#reportHash=8449f221ae1996837cdc28e754d38fbb">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtol.c @ Line&nbsp;59
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'int' conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>18</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtol.c" line="63">
+                      <a href="strtol.c_clang-tidy_17d5635b77bf6ee544f1ebf8a7cb1789.plist.html#reportHash=8449f221ae1996837cdc28e754d38fbb">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtol.c @ Line&nbsp;63
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'int' conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>19</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtol.c" line="65">
+                      <a href="strtol.c_clang-tidy_17d5635b77bf6ee544f1ebf8a7cb1789.plist.html#reportHash=8449f221ae1996837cdc28e754d38fbb">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtol.c @ Line&nbsp;65
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'int' conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>20</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtol.c" line="70">
+                      <a href="strtol.c_clang-tidy_17d5635b77bf6ee544f1ebf8a7cb1789.plist.html#reportHash=fba57df24f51b81829a77e40d1bd01a5">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtol.c @ Line&nbsp;70
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'int' conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>21</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtol.c" line="99">
+                      <a href="strtol.c_clang-tidy_17d5635b77bf6ee544f1ebf8a7cb1789.plist.html#reportHash=e4a2e963ca76f2bde637a77760e70831">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtol.c @ Line&nbsp;99
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'int' conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>22</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoll.c" line="57">
+                      <a href="strtoll.c_clang-tidy_91d29f7f8fe257abca599408a85dda84.plist.html#reportHash=76db10a29d0742b16a3f4ea79c9e8387">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoll.c @ Line&nbsp;57
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'int' conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>23</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoll.c" line="61">
+                      <a href="strtoll.c_clang-tidy_91d29f7f8fe257abca599408a85dda84.plist.html#reportHash=76db10a29d0742b16a3f4ea79c9e8387">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoll.c @ Line&nbsp;61
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'int' conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>24</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoll.c" line="63">
+                      <a href="strtoll.c_clang-tidy_91d29f7f8fe257abca599408a85dda84.plist.html#reportHash=76db10a29d0742b16a3f4ea79c9e8387">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoll.c @ Line&nbsp;63
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'int' conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>25</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoll.c" line="67">
+                      <a href="strtoll.c_clang-tidy_91d29f7f8fe257abca599408a85dda84.plist.html#reportHash=84743ac6baa25f85749d83ba257655a4">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoll.c @ Line&nbsp;67
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'int' conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>26</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoll.c" line="79">
+                      <a href="strtoll.c_clang-tidy_91d29f7f8fe257abca599408a85dda84.plist.html#reportHash=1ce9438c23a166db66641722136e546d">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoll.c @ Line&nbsp;79
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'int' conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>27</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoul.c" line="58">
+                      <a href="strtoul.c_clang-tidy_8c6b8e89c1da2c5e1f0feb00098cc8ee.plist.html#reportHash=e50c457c90660a42d2d000f219242db4">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoul.c @ Line&nbsp;58
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'int' conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>28</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoul.c" line="62">
+                      <a href="strtoul.c_clang-tidy_8c6b8e89c1da2c5e1f0feb00098cc8ee.plist.html#reportHash=e50c457c90660a42d2d000f219242db4">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoul.c @ Line&nbsp;62
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'int' conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>29</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoul.c" line="64">
+                      <a href="strtoul.c_clang-tidy_8c6b8e89c1da2c5e1f0feb00098cc8ee.plist.html#reportHash=e50c457c90660a42d2d000f219242db4">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoul.c @ Line&nbsp;64
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'int' conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>30</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoul.c" line="69">
+                      <a href="strtoul.c_clang-tidy_8c6b8e89c1da2c5e1f0feb00098cc8ee.plist.html#reportHash=05bf1d9b45bb4f94f083d2ccaa10fd07">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoul.c @ Line&nbsp;69
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'int' conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>31</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoul.c" line="80">
+                      <a href="strtoul.c_clang-tidy_8c6b8e89c1da2c5e1f0feb00098cc8ee.plist.html#reportHash=66768bebe9a1289542466879404d4bdf">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoul.c @ Line&nbsp;80
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'int' conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>32</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoull.c" line="58">
+                      <a href="strtoull.c_clang-tidy_5eb336112dc75d42e05ef6b8668fd298.plist.html#reportHash=b92b00a524cabd7c7a15acab189235d1">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoull.c @ Line&nbsp;58
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'int' conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>33</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoull.c" line="62">
+                      <a href="strtoull.c_clang-tidy_5eb336112dc75d42e05ef6b8668fd298.plist.html#reportHash=b92b00a524cabd7c7a15acab189235d1">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoull.c @ Line&nbsp;62
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'int' conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>34</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoull.c" line="64">
+                      <a href="strtoull.c_clang-tidy_5eb336112dc75d42e05ef6b8668fd298.plist.html#reportHash=b92b00a524cabd7c7a15acab189235d1">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoull.c @ Line&nbsp;64
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'int' conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>35</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoull.c" line="68">
+                      <a href="strtoull.c_clang-tidy_5eb336112dc75d42e05ef6b8668fd298.plist.html#reportHash=edc66d3b39d2a8921e1e6ccc4b0da6d8">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoull.c @ Line&nbsp;68
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'int' conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>36</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoull.c" line="79">
+                      <a href="strtoull.c_clang-tidy_5eb336112dc75d42e05ef6b8668fd298.plist.html#reportHash=e34fb06c24de9dfe4b871daf6b655ece">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdlib/strtoull.c @ Line&nbsp;79
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'int' conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>37</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdout/fprintf.c" line="9">
+                      <a href="fprintf.c_clang-tidy_2feee7468858062ba4bcba20bb230643.plist.html#reportHash=add7c010dff6d751db54ea91e3b7993f">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdout/fprintf.c @ Line&nbsp;9
+                      </a>
+                    </td>
+                    <td class="severity" severity="critical">
+                      <i class="severity-critical"
+                         title="critical"></i>
+                    </td>
+                    <td>clang-diagnostic-error</td>
+                    <td>'stdarg.h' file not found</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>38</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdout/sprintf.c" line="9">
+                      <a href="sprintf.c_clang-tidy_517965f346f17c2ced28fbf0994f9af8.plist.html#reportHash=82a0e4f4136b52bee1f78c7fa14abc93">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/libc/minimal/source/stdout/sprintf.c @ Line&nbsp;9
+                      </a>
+                    </td>
+                    <td class="severity" severity="critical">
+                      <i class="severity-critical"
+                         title="critical"></i>
+                    </td>
+                    <td>clang-diagnostic-error</td>
+                    <td>'stdarg.h' file not found</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>39</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/os/cbprintf.c" line="7">
+                      <a href="cbprintf.c_clang-tidy_5da5f5220d9929d1fdcc046b9a426780.plist.html#reportHash=5929edc21333a103be534e7508d17135">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/os/cbprintf.c @ Line&nbsp;7
+                      </a>
+                    </td>
+                    <td class="severity" severity="critical">
+                      <i class="severity-critical"
+                         title="critical"></i>
+                    </td>
+                    <td>clang-diagnostic-error</td>
+                    <td>'stdarg.h' file not found</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>40</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/os/cbprintf_complete.c" line="1505">
+                      <a href="cbprintf_complete.c_clang-tidy_982ea2bd37cccb03acfaf7f6e3e3f23e.plist.html#reportHash=6fbef98da6456989ec1a2a9409099136">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/os/cbprintf_complete.c @ Line&nbsp;1505
+                      </a>
+                    </td>
+                    <td class="severity" severity="medium">
+                      <i class="severity-medium"
+                         title="medium"></i>
+                    </td>
+                    <td><a href="https://clang.llvm.org/extra/clang-tidy/checks/bugprone-signed-char-misuse.html" target="_blank">bugprone-signed-char-misuse</a></td>
+                    <td>'signed char' to 'sint_value_type' (aka 'long long') conversion; consider casting to 'unsigned char' first.</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>41</td>
+                    <td file="/root/fuzz/kernel/zephyrproject/zephyr/lib/os/hex.c" line="7">
+                      <a href="hex.c_clang-tidy_7162a1884e8a16d31a9d2ab63bd5a32f.plist.html#reportHash=0e66b1d8376685f5dbea102640de52d0">
+                        /root/fuzz/kernel/zephyrproject/zephyr/lib/os/hex.c @ Line&nbsp;7
+                      </a>
+                    </td>
+                    <td class="severity" severity="critical">
+                      <i class="severity-critical"
+                         title="critical"></i>
+                    </td>
+                    <td>clang-diagnostic-error</td>
+                    <td>'stddef.h' file not found</td>
+                    <td class="bug-path-length">1</td>
+                    <td class="review-status review-status-unreviewed">
+                      unreviewed
+                    </td>
+                  </tr>
+    </table>
+  </div>
+  </body>
+</html>
